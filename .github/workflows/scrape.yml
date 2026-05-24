@@ -40,12 +40,14 @@ jobs:
           OUT_DIR: novels
 
       - name: deploy pages
-        uses: peaceiris/actions-gh-pages@v3
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           publish_dir: ./novels
           publish_branch: gh-pages
           force_orphan: true
+        env:
+          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
       - name: notify
         if: ${{ always() && steps.params.outputs.channel_id != '' }}
