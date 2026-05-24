@@ -1,4 +1,6 @@
 // Qtfm Podcast Scraper for GitHub Actions
+const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
@@ -9,22 +11,23 @@ const OUT_DIR = process.env.OUT_DIR || 'novels';
 
 const UA = 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36';
 
-async function httpGet(url) {
-  const resp = await fetch(url, {
-    headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml', 'Referer': 'https://m.qtfm.cn/' },
-    signal: AbortSignal.timeout(20000)
+function httpGet(url, acceptJSON) {
+  return new Promise((ok, fail) => {
+    const mod = url.startsWith('https') ? https : http;
+    const headers = acceptJSON
+      ? { 'User-Agent': UA, 'Accept': 'application/json', 'Origin': 'https://m.qtfm.cn', 'Referer': 'https://m.qtfm.cn/' }
+      : { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml', 'Referer': 'https://m.qtfm.cn/' };
+    const req = mod.get(url, { headers }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        if (res.statusCode !== 200) fail(new Error('HTTP ' + res.statusCode));
+        else ok(acceptJSON ? JSON.parse(d) : d);
+      });
+    });
+    req.on('error', fail);
+    req.setTimeout(20000, () => { req.destroy(); fail(new Error('timeout')); });
   });
-  if (!resp.ok) throw new Error('HTTP ' + resp.status);
-  return { status: resp.status, data: await resp.text() };
-}
-
-async function httpGetJSON(url) {
-  const resp = await fetch(url, {
-    headers: { 'User-Agent': UA, 'Accept': 'application/json', 'Origin': 'https://m.qtfm.cn', 'Referer': 'https://m.qtfm.cn/' },
-    signal: AbortSignal.timeout(20000)
-  });
-  if (!resp.ok) throw new Error('HTTP ' + resp.status);
-  return await resp.json();
 }
 
 function extractInitStores(html) {
@@ -47,8 +50,8 @@ function extractInitStores(html) {
 
 function fmtDur(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-  if (h > 0) return h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
-  return m + ':' + String(s).padStart(2,'0');
+  return h > 0 ? h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0')
+    : m + ':' + String(s).padStart(2,'0');
 }
 
 function esc(s) {
@@ -59,8 +62,8 @@ function esc(s) {
 async function main() {
   console.log('[' + CHANNEL_ID + '] Starting...');
 
-  const mainRes = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/');
-  const data = extractInitStores(mainRes.data);
+  const html = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/');
+  const data = extractInitStores(html);
   if (!data?.VChannelStore?.channel) throw new Error('Parse failed');
 
   const ch = data.VChannelStore.channel;
@@ -73,7 +76,7 @@ async function main() {
   let progs = [];
   if (ver) {
     try {
-      const api = await httpGetJSON('https://webapi.qtfm.cn/api/mobile/channels/' + CHANNEL_ID + '/programs?version=' + ver);
+      const api = await httpGet('https://webapi.qtfm.cn/api/mobile/channels/' + CHANNEL_ID + '/programs?version=' + ver, true);
       if (api.programs) { progs = api.programs; console.log('API: ' + progs.length + ' eps'); }
     } catch(e) { console.log('API fail: ' + e.message); }
   }
@@ -91,13 +94,13 @@ async function main() {
     const pid = progs[i].programId;
     if (!pid) { fail++; continue; }
     try {
-      const r = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/programs/' + pid + '/');
-      const am = r.data.match(/"audioUrl"\s*:\s*"([^"]+)"/);
+      const html2 = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/programs/' + pid + '/');
+      const am = html2.match(/"audioUrl"\s*:\s*"([^"]+)"/);
       if (am) {
         const ep = am[1].replace(/\\u0026/g, '&');
         try {
-          const rr = await httpGet(ep);
-          const hm = rr.data.match(/href="([^"]+)"/);
+          const html3 = await httpGet(ep);
+          const hm = html3.match(/href="([^"]+)"/);
           audio[pid] = hm ? hm[1] : ep;
         } catch(_) { audio[pid] = ep; }
         ok++;
@@ -105,7 +108,7 @@ async function main() {
     } catch(_) { fail++; }
     if ((i + 1) % 50 === 0 || i === progs.length - 1)
       console.log('  ' + (i+1) + '/' + progs.length + ' OK=' + ok + ' FAIL=' + fail);
-    if (i < progs.length - 1) await new Promise(r => setTimeout(r, 80 + Math.random() * 40));
+    if (i < progs.length - 1) await new Promise(r => setTimeout(r, 120));
   }
   console.log('Audio done: ' + ok + ' OK, ' + fail + ' FAIL');
 
