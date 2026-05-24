@@ -155,4 +155,4 @@ async function main() {
   console.log('Done: ' + progs.length + ' eps, ' + (rss.length/1024).toFixed(0) + 'KB');
 }
 
-main().catch(e => { console.error('FAIL:', e.message || 'unknown'); process.exit(1); });
+main().catch(e => { console.error('FAIL:', e && (e.message || e.stack || String(e)) || 'unknown'); process.exit(1); });
