@@ -50,11 +50,14 @@ jobs:
           ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
       - name: notify
-        if: ${{ always() && steps.params.outputs.channel_id != '' }}
+        if: ${{ success() && steps.params.outputs.channel_id != '' }}
         env:
           BOT: ${{ secrets.TG_BOT_TOKEN }}
           CHAT: ${{ secrets.TG_CHAT_ID }}
           CID: ${{ steps.params.outputs.channel_id }}
+          TITLE: ${{ steps.params.outputs.title }}
         run: |
           curl -s "https://api.telegram.org/bot${BOT}/sendMessage" \
-            -d "chat_id=${CHAT}&text=Done: channel ${CID}"
+            -d "chat_id=${CHAT}" \
+            -d "parse_mode=HTML" \
+            -d "text=✅ <b>抓取完成</b>%0A频道: ${TITLE:-${CID}}%0AID: ${CID}%0A📖 RSS: https://general74110.github.io/qtfm-podcast/${CID}.xml%0A🎧 Worker: https://qtfm-podcast.general74110.workers.dev/${CID}"
