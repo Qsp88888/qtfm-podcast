@@ -85,18 +85,22 @@ async function main() {
     try {
       const sr = await httpGetJSON('https://webapi.qtfm.cn/api/mobile/search/keyword/' + kw + '?page=1&pageSize=5');
       const channels = sr?.channels?.data || [];
-      const best = channels.sort((a,b) => (b.program_count||0)-(a.program_count||0))[0];
-      if (best?.id) {
-        const h2 = await httpGet('https://m.qtfm.cn/vchannels/' + best.id + '/');
-        const d2 = extractInitStores(h2);
-        if (d2?.VChannelStore?.channel?.id) {
-          ch = d2.VChannelStore.channel;
-          ver = ch.v || '';
-          title = ch.title || title;
-          desc = (ch.description || title).replace(/<[^>]+>/g, '').trim();
-          cover = ch.cover ? ch.cover + '!400' : '';
-          console.log('Using channel ' + best.id + ': ' + title + ', ' + (ch.program_count||0) + ' eps');
-        }
+      // try each channel until SSR is found
+      for (const candidate of channels) {
+        if (!candidate?.id) continue;
+        try {
+          const h2 = await httpGet('https://m.qtfm.cn/vchannels/' + candidate.id + '/');
+          const d2 = extractInitStores(h2);
+          if (d2?.VChannelStore?.channel?.id && d2.VChannelStore.programs?.total > 0) {
+            ch = d2.VChannelStore.channel;
+            ver = ch.v || '';
+            title = ch.title || candidate.title || title;
+            desc = (ch.description || title).replace(/<[^>]+>/g, '').trim();
+            cover = ch.cover ? ch.cover + '!400' : '';
+            console.log('Found real channel: ' + candidate.id + ' (' + title + ', ' + (ch.program_count||0) + ' eps)');
+            break;
+          }
+        } catch(e) { /* try next */ }
       }
     } catch(e) { console.log('Search failed:', e.message); }
     if (!ch) throw new Error('Cannot find channel content');
