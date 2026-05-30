@@ -1,248 +1,227 @@
-// Qtfm Podcast Scraper v4 - 全量抓取（走代理，不抓音频URL）
-const { execSync } = require('child_process');
+// Qtfm Podcast Scraper v5 - 最终优化版（gzip + keep-alive + 原生https）
+const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 const CHANNEL_ID = process.env.CHANNEL_ID;
 if (!CHANNEL_ID) { console.error('CHANNEL_ID required'); process.exit(1); }
 const WORKER_BASE = process.env.WORKER_BASE || 'https://qtfm-podcast.general74110.workers.dev';
 const OUT_DIR = process.env.OUT_DIR || 'novels';
+const MAX_WALK = 50000;
 const UA = 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36';
 
-function curl(url) {
-  const cmd = 'curl -sL --connect-timeout 15 --max-time 30 -H "User-Agent: ' + UA + '" -H "Accept: text/html,application/xhtml+xml" -H "Referer: https://m.qtfm.cn/" ' + JSON.stringify(url);
-  return execSync(cmd, { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] });
-}
-function curlJSON(url) {
-  const cmd = 'curl -sL --connect-timeout 15 --max-time 30 -H "User-Agent: ' + UA + '" -H "Accept: application/json" -H "Origin: https://m.qtfm.cn" -H "Referer: https://m.qtfm.cn/" ' + JSON.stringify(url);
-  return JSON.parse(execSync(cmd, { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }));
-}
+// Keep-alive agent
+const kaAgent = new https.Agent({ keepAlive: true, maxSockets: 10, timeout: 30000 });
+const kaAgentHttp = new http.Agent({ keepAlive: true, maxSockets: 10, timeout: 30000 });
 
-function httpGet(url, retries) {
-  for (let a = 1; a <= (retries||3); a++) {
-    try { return curl(url); } catch(e) { if (a < (retries||3)) execSync('sleep ' + (a*2)); else throw e; }
-  }
-}
-function httpGetJSON(url, retries) {
-  for (let a = 1; a <= (retries||3); a++) {
-    try { return curlJSON(url); } catch(e) { if (a < (retries||3)) execSync('sleep ' + (a*2)); else throw e; }
-  }
+function httpFetch(url, { json = true, retries = 3 } = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const mod = u.protocol === 'https:' ? https : http;
+    const agent = u.protocol === 'https:' ? kaAgent : kaAgentHttp;
+
+    function tryReq(n) {
+      const req = mod.get(u.href, {
+        agent, timeout: 30000,
+        headers: {
+          'User-Agent': UA,
+          'Accept': json ? 'application/json, text/html' : 'text/html',
+          'Accept-Encoding': 'gzip, deflate',
+          ...(json ? { 'Origin': 'https://m.qtfm.cn', 'Referer': 'https://m.qtfm.cn/' } : {}),
+        },
+      }, (res) => {
+        const chunks = [];
+        const stream = res.headers['content-encoding'] === 'gzip'
+          ? res.pipe(zlib.createGunzip())
+          : res.headers['content-encoding'] === 'deflate'
+            ? res.pipe(zlib.createInflate())
+            : res;
+
+        stream.on('data', c => chunks.push(c));
+        stream.on('end', () => {
+          const raw = Buffer.concat(chunks).toString('utf8');
+          if (res.statusCode >= 400) {
+            if (n > 1) return setTimeout(() => tryReq(n - 1), 2000);
+            return reject(new Error(`HTTP ${res.statusCode}`));
+          }
+          try { resolve(json ? JSON.parse(raw) : raw); }
+          catch (e) { reject(new Error(`parse: ${e.message.slice(0, 60)}`)); }
+        });
+      });
+      req.on('error', e => { if (n > 1) setTimeout(() => tryReq(n - 1), 2000); else reject(e); });
+      req.on('timeout', () => { req.destroy(); if (n > 1) setTimeout(() => tryReq(n - 1), 2000); else reject(new Error('timeout')); });
+      req.end();
+    }
+    tryReq(retries);
+  });
 }
 
 function extractInitStores(html) {
   const m = html.match(/window\.__initStores\s*=\s*(\{)/);
   if (!m) return null;
-  const str = html.slice(m.index + m[0].length - 1);
-  let d = 0, ins = false, esc = false, end = 0;
-  for (let i = 0; i < str.length; i++) {
-    const c = str[i];
+  const s = m.index + m[0].length - 1;
+  let d = 0, ins = false, esc = false;
+  for (let i = 0; i < html.length - s; i++) {
+    const c = html[s + i];
     if (esc) { esc = false; continue; }
     if (c === '\\' && ins) { esc = true; continue; }
     if (c === '"') { ins = !ins; continue; }
     if (ins) continue;
     if (c === '{') d++;
-    else if (c === '}') { d--; if (d === 0) { end = i + 1; break; } }
+    else if (c === '}') { d--; if (d === 0) return JSON.parse(html.slice(s, s + i + 1)); }
   }
-  if (end === 0) return null;
-  try { return JSON.parse(str.slice(0, end)); } catch (_) { return null; }
+  return null;
 }
 
 function fmtDur(s) {
+  s = parseInt(s) || 0;
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), s2 = s % 60;
-  return h > 0 ? h + ':' + String(m).padStart(2,'0') + ':' + String(s2).padStart(2,'0')
-    : m + ':' + String(s2).padStart(2,'0');
+  return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(s2).padStart(2,'0')}` : `${m}:${String(s2).padStart(2,'0')}`;
 }
-function esc(s) {
-  if (!s) return '';
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
+function esc(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 async function main() {
-  const startTime = Date.now();
-  console.log('[' + CHANNEL_ID + '] Starting...');
+  const T0 = Date.now();
+  const log = (...a) => console.log(`[${Math.round((Date.now()-T0)/1000)}s]`, ...a);
+  log(`${CHANNEL_ID} starting`);
 
-  // 1. 获取频道元数据 + 前30集
-  const html = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/');
+  // ── 1. 频道元数据 ──
+  const html = await httpFetch(`https://m.qtfm.cn/vchannels/${CHANNEL_ID}/`, { json: false });
   let data = extractInitStores(html);
-  
-  let ch, ver, title, desc, cover;
+  let ch, ver, title = '', desc = '', cover = '';
+
   if (data?.VChannelStore?.channel?.id) {
     ch = data.VChannelStore.channel;
     ver = ch.v || '';
     title = ch.title || '';
     desc = (ch.description || title).replace(/<[^>]+>/g, '').trim();
     cover = ch.cover ? ch.cover + '!400' : '';
-    console.log('Title: ' + title + ', Total: ' + (ch.program_count || 0));
+    log(`${title} - ${ch.program_count || 0} eps`);
   } else {
-    // SSR 为空，从SEO获取
     const seo = data?.VChannelStore?.seo || [];
-    const seoTitle = seo.find(s => s.elementType === 'title')?.innerText || '';
-    title = seoTitle.replace(/\s*有声小说在线收听.*$/, '') || 'Channel ' + CHANNEL_ID;
+    title = (seo.find(s => s.elementType === 'title')?.innerText || '').replace(/\s*有声小说在线收听.*$/, '') || `Channel ${CHANNEL_ID}`;
     desc = seo.find(s => s.elementType === 'meta' && s.name === 'description')?.content?.slice(0,200) || title;
-    console.log('SSR empty, SEO title: ' + title);
-    // 搜索替代频道
-    const kw = encodeURIComponent(title.replace(/\s*\(.*?\)\s*/, '').trim());
-    try {
-      const sr = await httpGetJSON('https://webapi.qtfm.cn/api/mobile/search/keyword/' + kw + '?page=1&pageSize=5');
-      const channels = sr?.channels?.data || [];
-      // try each channel until SSR is found
-      for (const candidate of channels) {
-        if (!candidate?.id) continue;
-        try {
-          const h2 = await httpGet('https://m.qtfm.cn/vchannels/' + candidate.id + '/');
-          const d2 = extractInitStores(h2);
-          if (d2?.VChannelStore?.channel?.id && d2.VChannelStore.programs?.total > 0) {
-            ch = d2.VChannelStore.channel;
-            ver = ch.v || '';
-            title = ch.title || candidate.title || title;
-            desc = (ch.description || title).replace(/<[^>]+>/g, '').trim();
-            cover = ch.cover ? ch.cover + '!400' : '';
-            console.log('Found real channel: ' + candidate.id + ' (' + title + ', ' + (ch.program_count||0) + ' eps)');
-            break;
-          }
-        } catch(e) { /* try next */ }
+    log(`SSR empty, trying search: ${title}`);
+    for (const c of ((await httpFetch(`https://webapi.qtfm.cn/api/mobile/search/keyword/${encodeURIComponent(title.replace(/\s*\(.*?\)\s*/,'').trim())}?page=1&pageSize=10`))?.channels?.data || [])) {
+      if (!c?.id) continue;
+      const h2 = await httpFetch(`https://m.qtfm.cn/vchannels/${c.id}/`, { json: false });
+      const d2 = extractInitStores(h2);
+      if (d2?.VChannelStore?.channel?.id && d2.VChannelStore.programs?.total > 0) {
+        ch = d2.VChannelStore.channel; ver = ch.v || '';
+        title = ch.title || c.title || title;
+        desc = (ch.description || title).replace(/<[^>]+>/g, '').trim();
+        cover = ch.cover ? ch.cover + '!400' : '';
+        log(`Found: ${c.id} (${title}, ${ch.program_count || 0})`);
+        break;
       }
-    } catch(e) { console.log('Search failed:', e.message); }
-    if (!ch) throw new Error('Cannot find channel content');
+    }
+    if (!ch) throw new Error('Channel not found');
   }
 
-  // 2. 获取所有节目（API第一页 + nextProgramId链遍历）
-  let allProgs = [];
-  const seenIds = new Set();
+  // ── 2. 全量链式遍历 ──
+  const seen = new Set();
+  const all = [];
 
   let batch = [];
-  if (ver) {
+  if (ver) { try { batch = (await httpFetch(`https://webapi.qtfm.cn/api/mobile/channels/${CHANNEL_ID}/programs?version=${ver}`)).programs || []; } catch (_) {} }
+  if (!batch.length) batch = data?.VChannelStore?.programs?.items || [];
+  for (const p of batch) { if (!seen.has(p.programId)) { seen.add(p.programId); all.push(p); } }
+
+  let cur = all.length ? all[all.length - 1].programId : null;
+  let walked = 0, errs = 0;
+
+  const reporter = setInterval(() => log(`walk:${walked} have:${all.length} cur:${cur}`), 10000);
+
+  while (cur && walked < MAX_WALK) {
     try {
-      const api = await httpGetJSON('https://webapi.qtfm.cn/api/mobile/channels/' + CHANNEL_ID + '/programs?version=' + ver);
-      if (api.programs) batch = api.programs;
-    } catch(e) {}
-  }
-  if (batch.length === 0) batch = data?.VChannelStore?.programs?.items || [];
-  console.log('Initial: ' + batch.length + ' eps');
+      const h = await httpFetch(`https://m.qtfm.cn/vchannels/${CHANNEL_ID}/programs/${cur}/`, { json: false });
+      const d = extractInitStores(h);
+      if (!d?.ProgramStore?.programInfo) { errs++; if (errs > 3) break; cur = null; break; }
+      errs = 0;
 
-  for (const p of batch) {
-    if (!seenIds.has(p.programId)) {
-      seenIds.add(p.programId);
-      allProgs.push(p);
-    }
-  }
+      const pi = d.ProgramStore.programInfo;
+      const nid = pi.nextProgramId;
+      if (!nid || seen.has(nid)) break;
 
-  // 顺着 nextProgramId 链遍历
-  let lastId = allProgs.length > 0 ? allProgs[allProgs.length - 1].programId : null;
-  let walked = 0;
-  
-  while (lastId && walked < 20000) {
-    try {
-      const h2 = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/programs/' + lastId + '/');
-      const pd = extractInitStores(h2);
-      if (!pd?.ProgramStore?.programInfo) break;
-      
-      const pi = pd.ProgramStore.programInfo;
-      const nextId = pi.nextProgramId;
-      if (!nextId || seenIds.has(nextId)) break;
-
-      // 把新节目加入（从siblingPrograms里批量获取信息）
-      const sibs = pd.ProgramStore.siblingPrograms || [];
-      let added = 0;
-      for (const sp of sibs) {
-        if (!seenIds.has(sp.programId)) {
-          seenIds.add(sp.programId);
-          allProgs.push(sp);
-          added++;
-          if (sp.programId === nextId) lastId = nextId;
-        }
-      }
-      // 如果sibling里没有nextId，单独抓
-      if (!seenIds.has(nextId)) {
-        const h3 = await httpGet('https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/programs/' + nextId + '/');
-        const pd3 = extractInitStores(h3);
-        if (pd3?.ProgramStore?.programInfo) {
-          const pi3 = pd3.ProgramStore.programInfo;
-          seenIds.add(nextId);
-          allProgs.push({ programId: nextId, title: pi3.title || '', duration: pi3.duration || 0, updateTime: pi3.updateTime || null });
-          lastId = nextId;
-          added++;
-        }
-      }
+      seen.add(nid);
+      all.push({
+        programId: nid,
+        title: pi.title || '',
+        duration: pi.duration || 0,
+        updateTime: pi.updateTime || all[0]?.updateTime || '2022-01-01T00:00:00.000Z',
+      });
+      cur = nid;
       walked++;
-      if (walked % 50 === 0) {
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        console.log('  Walk: ' + walked + ', total: ' + allProgs.length + ', next: ' + lastId + ', ' + elapsed + 's');
-      }
-    } catch(e) {
-      console.log('  Walk stop: ' + walked + ' err: ' + e.message);
-      break;
-    }
-    execSync('sleep 0.12');
+    } catch (e) { log(`err @ ${walked}: ${e.message.slice(0,60)}`); errs++; if (errs > 3) break; cur = null; }
+  }
+  clearInterval(reporter);
+  log(`walked ${walked}, total ${all.length}`);
+
+  // ── 排序去重 ──
+  const ep = (t) => { const m = (t || '').match(/第(\d+)集/); return m ? parseInt(m[1]) : 999999; };
+  all.sort((a, b) => ep(a.title) - ep(b.title));
+  const dedup = []; const ds = new Set();
+  for (const p of all) { if (!ds.has(p.programId)) { ds.add(p.programId); dedup.push(p); } }
+  if (dedup.length !== all.length) log(`-${all.length - dedup.length} dupes`);
+
+  if (!dedup.length) throw new Error('No episodes');
+
+  const nums = dedup.map(p => ep(p.title)).filter(n => n !== 999999);
+  if (nums.length) {
+    let g = 0, gl = [];
+    for (let i = 0; i < nums.length; i++) { if (nums[i] !== nums[0] + i) { g++; if (gl.length < 10) gl.push(nums[i]); } }
+    log(g ? `GAPS: ${g} (${gl.join(',')})` : `SEQ OK: ${nums[0]}-${nums[nums.length-1]}`);
   }
 
-  console.log('Total: ' + allProgs.length + ' eps (walked ' + walked + ')');
-  // Sort by episode number
-  allProgs.sort((a,b) => {
-    const gn = t => { const m=(t||'').match(/第(\\d+)集/); return m ? parseInt(m[1]) : Infinity; };
-    return gn(a.title) - gn(b.title);
-  });
-  
-  // Dedup
-  const seenSet = new Set();
-  const deduped = allProgs.filter(p => { const k = p.programId; if (seenSet.has(k)) return false; seenSet.add(k); return true; });
-  if (deduped.length !== allProgs.length) console.log('  Removed ' + (allProgs.length-deduped.length) + ' duplicates');
-  allProgs.length = 0; allProgs.push(...deduped);
-  
-  // Gap check
-  const nums = allProgs.map(p => { const m = (p.title||'').match(/第(\d+)集/); return m ? parseInt(m[1]) : null; }).filter(n => n !== null);
-  if (nums.length > 0) {
-    let gaps = 0;
-    for (let i = 0; i < nums.length; i++) {
-      if (nums[i] !== nums[0] + i) gaps++;
-    }
-    if (gaps > 0) console.log('  Warning: ' + gaps + ' sequence gaps');
-    else console.log('  Sequence OK: ' + nums[0] + ' ~ ' + nums[nums.length-1]);
-  }
-
-  if (allProgs.length === 0) throw new Error('No episodes');
-
-  // 3. 生成RSS（音频URL走CF Worker代理）
+  // ── 3. RSS ──
   const now = new Date().toUTCString();
   let items = '';
-  for (const p of allProgs) {
-    const pid = p.programId;
-    if (!pid) continue;
-    const au = WORKER_BASE + '/audio/' + CHANNEL_ID + '/' + pid;
-    items += '    <item>\n      <title>' + esc(p.title) + '</title>\n';
-    items += '      <link>https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/programs/' + pid + '/</link>\n';
-    items += '      <guid isPermaLink="false">qtfm-' + CHANNEL_ID + '-' + pid + '</guid>\n';
-    items += '      <description>' + esc(p.title) + '</description>\n';
-    items += '      <enclosure url="' + esc(au) + '" length="0" type="audio/mpeg"/>\n';
-    items += '      <itunes:duration>' + fmtDur(p.duration || 0) + '</itunes:duration>\n';
-    items += '      <itunes:author>蜻蜓FM</itunes:author>\n';
-    items += '      <pubDate>' + (p.updateTime ? new Date(p.updateTime).toUTCString() : now) + '</pubDate>\n    </item>\n';
+  for (const p of dedup) {
+    if (!p.programId) continue;
+    items += `    <item>
+      <title>${esc(p.title)}</title>
+      <link>https://m.qtfm.cn/vchannels/${CHANNEL_ID}/programs/${p.programId}/</link>
+      <guid isPermaLink="false">qtfm-${CHANNEL_ID}-${p.programId}</guid>
+      <description>${esc(p.title)}</description>
+      <enclosure url="${esc(WORKER_BASE)}/audio/${CHANNEL_ID}/${p.programId}" length="0" type="audio/mpeg"/>
+      <itunes:duration>${fmtDur(p.duration)}</itunes:duration>
+      <itunes:author>蜻蜓FM</itunes:author>
+      <pubDate>${p.updateTime ? new Date(p.updateTime).toUTCString() : now}</pubDate>
+    </item>\n`;
   }
 
-  const rss = '<?xml version="1.0" encoding="UTF-8"?>\n' +
-    '<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" version="2.0">\n  <channel>\n' +
-    '    <title>' + esc(title) + '</title>\n    <link>https://m.qtfm.cn/vchannels/' + CHANNEL_ID + '/</link>\n' +
-    '    <description>' + esc(desc) + '</description>\n    <language>zh-cn</language>\n    <itunes:author>蜻蜓FM</itunes:author>\n' +
-    '    <itunes:summary>' + esc(desc) + '</itunes:summary>\n' +
-    (cover ? '    <itunes:image href="' + esc(cover) + '"/>\n' : '') +
-    '    <itunes:category text="有声书"/>\n    <lastBuildDate>' + now + '</lastBuildDate>\n    <pubDate>' + now + '</pubDate>\n' +
-    items + '  </channel>\n</rss>\n';
+  const rss = `<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" version="2.0">
+  <channel>
+    <title>${esc(title)}</title>
+    <link>https://m.qtfm.cn/vchannels/${CHANNEL_ID}/</link>
+    <description>${esc(desc)}</description>
+    <language>zh-cn</language>
+    <itunes:author>蜻蜓FM</itunes:author>
+    <itunes:summary>${esc(desc)}</itunes:summary>
+    ${cover ? `<itunes:image href="${esc(cover)}"/>` : ''}
+    <itunes:category text="有声书"/>
+    <lastBuildDate>${now}</lastBuildDate>
+    <pubDate>${now}</pubDate>
+${items}  </channel>
+</rss>\n`;
 
-  // 4. 写入文件
+  // ── 4. 写文件 ──
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  fs.writeFileSync(path.join(OUT_DIR, CHANNEL_ID + '.xml'), rss, 'utf8');
-  const meta = { channelId: CHANNEL_ID, title, programs: allProgs.length, generatedAt: now,
-    duration: Math.round((Date.now() - startTime) / 1000) + 's' };
-  fs.writeFileSync(path.join(OUT_DIR, CHANNEL_ID + '.json'), JSON.stringify(meta, null, 2), 'utf8');
+  fs.writeFileSync(path.join(OUT_DIR, `${CHANNEL_ID}.xml`), rss, 'utf8');
+
+  const meta = { channelId: CHANNEL_ID, title, programs: dedup.length, generatedAt: now, duration: `${Math.round((Date.now()-T0)/1000)}s` };
+  fs.writeFileSync(path.join(OUT_DIR, `${CHANNEL_ID}.json`), JSON.stringify(meta, null, 2), 'utf8');
 
   let idx = [];
-  try { idx = JSON.parse(fs.readFileSync(path.join(OUT_DIR, 'index.json'), 'utf8')); } catch(_) {}
+  try { idx = JSON.parse(fs.readFileSync(path.join(OUT_DIR, 'index.json'), 'utf8')); } catch (_) {}
   const ex = idx.find(i => i.channelId === CHANNEL_ID);
   if (ex) Object.assign(ex, meta); else idx.push(meta);
   fs.writeFileSync(path.join(OUT_DIR, 'index.json'), JSON.stringify(idx, null, 2), 'utf8');
 
-  const elapsed = Math.round((Date.now() - startTime) / 1000);
-  console.log('Done: ' + allProgs.length + ' eps, ' + (rss.length/1024).toFixed(0) + 'KB, ' + elapsed + 's');
+  log(`DONE: ${dedup.length} eps, ${Math.round(rss.length/1024)}KB`);
 }
 
-main().catch(e => { console.error('FAIL:', e && (e.message || String(e)) || 'unknown'); process.exit(1); });
+main().catch(e => { console.error('FAIL:', e.message || String(e)); process.exit(1); });
