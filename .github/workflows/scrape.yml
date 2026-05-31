@@ -9,7 +9,7 @@ on:
       worker_base:
         description: 'Worker地址'
         required: false
-        default: 'https://qtfm-podcast.general74110.workers.dev'
+        default: 'https://qtfm-podcast.7452323.workers.dev'
         type: string
       action_type:
         description: 'initial | update'
@@ -33,12 +33,12 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             CID="${{ github.event.client_payload.channel_id }}"
-            WB="${{ github.event.client_payload.worker_base || 'https://qtfm-podcast.general74110.workers.dev' }}"
+            WB="${{ github.event.client_payload.worker_base || 'https://qtfm-podcast.7452323.workers.dev' }}"
             TITLE="${{ github.event.client_payload.title }}"
             AT="${{ github.event.client_payload.action_type || 'initial' }}"
           else
             CID="${{ github.event.inputs.channel_id }}"
-            WB="${{ github.event.inputs.worker_base || 'https://qtfm-podcast.general74110.workers.dev' }}"
+            WB="${{ github.event.inputs.worker_base || 'https://qtfm-podcast.7452323.workers.dev' }}"
             TITLE="${{ github.event.inputs.title || 'manual' }}"
             AT="${{ github.event.inputs.action_type || 'initial' }}"
           fi
@@ -63,7 +63,7 @@ jobs:
           publish_branch: gh-pages
           keep_files: true
           user_name: 'qtfm-bot'
-          user_email: 'bot@general74110.com'
+          user_email: 'bot@7452323.workers.dev'
 
       - name: notify worker
         if: ${{ success() && steps.params.outputs.channel_id != '' }}
@@ -93,4 +93,4 @@ jobs:
           curl -s "https://api.telegram.org/bot${BOT}/sendMessage" \
             -d "chat_id=${CHAT}" \
             -d "parse_mode=HTML" \
-            -d "text=${STATUS_ICON} <b>${TITLE:-${CID}}</b>%0AID: ${CID}%0A集数: ${COUNT}%0A状态: ${STATUS_TEXT}%0A📖 RSS: https://general74110.github.io/qtfm-podcast/${CID}.xml%0A🎧 Worker: https://qtfm-podcast.general74110.workers.dev/${CID}"
+            -d "text=${STATUS_ICON} <b>${TITLE:-${CID}}</b>%0AID: ${CID}%0A集数: ${COUNT}%0A状态: ${STATUS_TEXT}%0A📖 RSS: https://7452323.github.io/qtfm-podcast/${CID}.xml%0A🎧 Worker: https://qtfm-podcast.7452323.workers.dev/${CID}"

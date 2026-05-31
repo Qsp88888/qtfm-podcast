@@ -11,7 +11,7 @@ const zlib = require('zlib');
 const CID = process.env.CHANNEL_ID;
 if (!CID) { console.error('CHANNEL_ID required'); process.exit(1); }
 
-const WORKER_BASE = process.env.WORKER_BASE || 'https://qtfm-podcast.general74110.workers.dev';
+const WORKER_BASE = process.env.WORKER_BASE || 'https://qtfm-podcast.7452323.workers.dev';
 const OUT_DIR = process.env.OUT_DIR || 'novels';
 const UA = 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36';
 
@@ -224,7 +224,7 @@ function sortDedup(programs) {
     if (/片花|预告|花絮|彩蛋/i.test(t)) return 999999;
     return 999999;
   };
-  programs.sort((a, b) => ep(a.title) - ep(b.title));
+  programs.sort((a, b) => ep(b.title) - ep(a.title));
 
   const dedup = [];
   const seen = new Set();
@@ -233,14 +233,11 @@ function sortDedup(programs) {
   }
   if (dedup.length !== programs.length) console.log(`[sort] -${programs.length - dedup.length} dupes`);
 
-  // 检查序列完整性
+  // 统计已排序的集数范围
   const nums = dedup.map(p => ep(p.title)).filter(n => n !== 999999);
   if (nums.length) {
-    let gaps = 0, gapSamples = [];
-    for (let i = 0; i < nums.length; i++) {
-      if (nums[i] !== nums[0] + i) { gaps++; if (gapSamples.length < 10) gapSamples.push(nums[i]); }
-    }
-    console.log(gaps ? `[sort] GAPS: ${gaps} (${gapSamples.join(',')})` : `[sort] SEQ: ${nums[0]}-${nums[nums.length - 1]}`);
+    const sorted = [...nums].sort((a,b) => a-b);
+    console.log(`[sort] RANGE: ${sorted[0]}-${sorted[sorted.length-1]} (${nums.length} eps)`);
   }
   return dedup;
 }
@@ -248,7 +245,7 @@ function sortDedup(programs) {
 // ── 4. 检测完本/连载 ──
 function detectCompletion(programs, channel) {
   const total = channel?.program_count || programs.length;
-  const last = programs[programs.length - 1];
+  const last = programs[0]; // reverse order, index 0 = newest
   const hasNext = last && last.programId && true; // 如果是通过链式获取的最后一条，肯定有next
   // 完本判定：爬到的数量 >= 频道声明的总数
   const isComplete = programs.length >= total;
@@ -265,9 +262,16 @@ function detectCompletion(programs, channel) {
 // ── 5. 生成RSS ──
 function generateRSS(title, desc, cover, programs) {
   const now = new Date().toUTCString();
+  // 按节目编号排序后，用位置生成顺序日期（第1集最新，最后集最旧）
+  // 这样苹果播客按pubDate降序排列时，节目从第1集到最后一集正序播放
+  const startDate = new Date(); // 今天（第1集）
   const items = programs
     .filter(p => p.programId)
-    .map(p => `    <item>
+    .map((p, i) => {
+      // 从今天开始每天倒退一天
+      const d = new Date(startDate);
+      d.setDate(d.getDate() - i);
+      return `    <item>
       <title>${esc(p.title)}</title>
       <link>https://m.qtfm.cn/vchannels/${CID}/programs/${p.programId}/</link>
       <guid isPermaLink="false">qtfm-${CID}-${p.programId}</guid>
@@ -275,8 +279,9 @@ function generateRSS(title, desc, cover, programs) {
       <enclosure url="${esc(WORKER_BASE)}/audio/${CID}/${p.programId}" length="0" type="audio/mpeg"/>
       <itunes:duration>${fmtDur(p.duration)}</itunes:duration>
       <itunes:author>蜻蜓FM</itunes:author>
-      <pubDate>${p.updateTime ? new Date(p.updateTime).toUTCString() : now}</pubDate>
-    </item>`)
+      <pubDate>${d.toUTCString()}</pubDate>
+    </item>`;
+    })
     .join('\n');
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -300,7 +305,7 @@ ${items}
 // ── 6. 从gh-pages读取旧状态 ──
 async function fetchExistingState() {
   try {
-    const r = await fetch(`https://general74110.github.io/qtfm-podcast/state.json`, { signal: AbortSignal.timeout(5000) });
+    const r = await fetch(`https://7452323.github.io/qtfm-podcast/state.json`, { signal: AbortSignal.timeout(5000) });
     if (r.ok) {
       const state = await r.json();
       return state[CID] || null;
@@ -318,7 +323,7 @@ async function incrementalUpdate(existingState, programs) {
   const existingIds = new Set();
   // 从已有RSS中恢复已爬的programId
   try {
-    const r = await fetch(`https://general74110.github.io/qtfm-podcast/${CID}.json`, { signal: AbortSignal.timeout(5000) });
+    const r = await fetch(`https://7452323.github.io/qtfm-podcast/${CID}.json`, { signal: AbortSignal.timeout(5000) });
     if (r.ok) {
       // 直接从state里拿
     }

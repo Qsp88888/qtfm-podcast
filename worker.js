@@ -6,7 +6,7 @@ const CACHE_TTL = 21600; // 6h
 const REFRESH_THRESHOLD = 21600 * 1000; // 6h
 const UA = 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36';
 
-const PAGE_BASE = 'https://general74110.github.io/qtfm-podcast';
+const PAGE_BASE = 'https://7452323.github.io/qtfm-podcast';
 
 // ── Telegram ──
 function tgSend(chatId, text, parseMode, env) {
