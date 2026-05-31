@@ -224,7 +224,7 @@ function sortDedup(programs) {
     if (/片花|预告|花絮|彩蛋/i.test(t)) return 999999;
     return 999999;
   };
-  programs.sort((a, b) => ep(a.title) - ep(b.title));
+  programs.sort((a, b) => ep(b.title) - ep(a.title));
 
   const dedup = [];
   const seen = new Set();
@@ -233,14 +233,11 @@ function sortDedup(programs) {
   }
   if (dedup.length !== programs.length) console.log(`[sort] -${programs.length - dedup.length} dupes`);
 
-  // 检查序列完整性
+  // 统计已排序的集数范围
   const nums = dedup.map(p => ep(p.title)).filter(n => n !== 999999);
   if (nums.length) {
-    let gaps = 0, gapSamples = [];
-    for (let i = 0; i < nums.length; i++) {
-      if (nums[i] !== nums[0] + i) { gaps++; if (gapSamples.length < 10) gapSamples.push(nums[i]); }
-    }
-    console.log(gaps ? `[sort] GAPS: ${gaps} (${gapSamples.join(',')})` : `[sort] SEQ: ${nums[0]}-${nums[nums.length - 1]}`);
+    const sorted = [...nums].sort((a,b) => a-b);
+    console.log(`[sort] RANGE: ${sorted[0]}-${sorted[sorted.length-1]} (${nums.length} eps)`);
   }
   return dedup;
 }
@@ -248,7 +245,7 @@ function sortDedup(programs) {
 // ── 4. 检测完本/连载 ──
 function detectCompletion(programs, channel) {
   const total = channel?.program_count || programs.length;
-  const last = programs[programs.length - 1];
+  const last = programs[0]; // reverse order, index 0 = newest
   const hasNext = last && last.programId && true; // 如果是通过链式获取的最后一条，肯定有next
   // 完本判定：爬到的数量 >= 频道声明的总数
   const isComplete = programs.length >= total;
