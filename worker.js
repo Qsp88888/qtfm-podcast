@@ -406,6 +406,13 @@ async function handleTG(env, body, base) {
         env.QTFM_CACHE.delete('rss:' + target).catch(() => {}),
         env.QTFM_CACHE.delete('meta:' + target).catch(() => {}),
       ]);
+      // 从 active_channels 中移除
+      const raw = await env.QTFM_CACHE.get('active_channels', { type: 'text' }).catch(() => null);
+      if (raw) {
+        let list = JSON.parse(raw);
+        list = list.filter(c => c.id !== target);
+        await env.QTFM_CACHE.put('active_channels', JSON.stringify(list), { expirationTtl: 86400 * 30 });
+      }
       await tgSendHTML(chatId, `🗑️ 已清除频道 ${target} 的缓存`, env);
     } else {
       // 清除所有缓存

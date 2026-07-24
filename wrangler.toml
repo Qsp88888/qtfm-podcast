@@ -1,0 +1,7 @@
+name = "qtfm-podcast"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "QTFM_CACHE"
+id = "ddc96e3a93144f59abbdd963e65fde62"
